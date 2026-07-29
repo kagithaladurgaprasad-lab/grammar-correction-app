@@ -1,6 +1,10 @@
+import os
+
+# MUST be set before importing tensorflow or keras
+os.environ["TF_USE_LEGACY_KERAS"] = "1"
+
 import difflib
 import json
-import os
 import pickle
 import time
 
@@ -8,13 +12,12 @@ import numpy as np
 import streamlit as st
 import torch
 
-# Handle Keras 2 / Keras 3 compatibility on Streamlit Cloud
+# Keras 2 compatibility loader
 try:
     import tf_keras as keras
     from tf_keras.models import Model, load_model
     from tf_keras.layers import Input
 except ImportError:
-    import tensorflow.keras as keras
     from tensorflow.keras.models import Model, load_model
     from tensorflow.keras.layers import Input
 
