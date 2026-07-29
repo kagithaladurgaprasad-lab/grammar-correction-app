@@ -1,11 +1,7 @@
 import os
-import sys
 
-# 1. Force TensorFlow to use legacy Keras 2 (Fixes Keras 3 deserialization errors)
+# MUST be set before importing tensorflow or keras
 os.environ["TF_USE_LEGACY_KERAS"] = "1"
-
-# 2. Disable Streamlit's module watcher on transformers submodules (Fixes missing torchvision warnings/logs)
-os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
 
 import difflib
 import json
@@ -25,8 +21,7 @@ except ImportError:
     from tensorflow.keras.models import Model, load_model
     from tensorflow.keras.layers import Input
 
-# Import explicitly to avoid triggering transformers auto-discovery on vision packages
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 # ----------------------------------------------------------------------------
 # Page config
@@ -173,7 +168,7 @@ st.markdown(
         }
         div.stButton > button:hover { transform: translateY(-2px); box-shadow: 0 12px 28px rgba(236, 72, 153, 0.4); }
 
-        /* TEXTAREA STYLING FIX */
+        /* FIXED TEXTAREA STYLING */
         .stTextArea textarea {
             background-color: #1a162b !important;
             color: #ffffff !important;
