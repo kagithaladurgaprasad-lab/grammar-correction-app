@@ -7,8 +7,17 @@ import time
 import numpy as np
 import streamlit as st
 import torch
-from tensorflow.keras.models import Model, load_model
-from tensorflow.keras.layers import Input
+
+# Handle Keras 2 / Keras 3 compatibility on Streamlit Cloud
+try:
+    import tf_keras as keras
+    from tf_keras.models import Model, load_model
+    from tf_keras.layers import Input
+except ImportError:
+    import tensorflow.keras as keras
+    from tensorflow.keras.models import Model, load_model
+    from tensorflow.keras.layers import Input
+
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 # ----------------------------------------------------------------------------
@@ -238,14 +247,14 @@ def _rebuild_inference_models(full_model, rnn_type, hid_dim):
 @st.cache_resource(show_spinner=False)
 def load_lstm():
     _, config = load_tokenizer_and_config()
-    full_model = load_model(os.path.join(MODELS_DIR, "lstm_model.h5"))
+    full_model = load_model(os.path.join(MODELS_DIR, "lstm_model.h5"), compile=False)
     return _rebuild_inference_models(full_model, "lstm", config["HID_DIM"])
 
 
 @st.cache_resource(show_spinner=False)
 def load_gru():
     _, config = load_tokenizer_and_config()
-    full_model = load_model(os.path.join(MODELS_DIR, "gru_model.h5"))
+    full_model = load_model(os.path.join(MODELS_DIR, "gru_model.h5"), compile=False)
     return _rebuild_inference_models(full_model, "gru", config["HID_DIM"])
 
 
