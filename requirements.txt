@@ -5,3 +5,9 @@ transformers
 sentencepiece
 numpy
 scikit-learn
+streamlit
+tensorflow
+tf-keras
+torch
+transformers
+numpy
