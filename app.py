@@ -16,10 +16,11 @@ import torch
 try:
     import tf_keras as keras
     from tf_keras.models import Model, load_model
-    from tf_keras.layers import Input
+    from tf_keras.layers import Input, LSTM, GRU, Dense, Embedding
 except ImportError:
+    import tensorflow.keras as keras
     from tensorflow.keras.models import Model, load_model
-    from tensorflow.keras.layers import Input
+    from tensorflow.keras.layers import Input, LSTM, GRU, Dense, Embedding
 
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
@@ -247,23 +248,42 @@ def _rebuild_inference_models(full_model, rnn_type, hid_dim):
     return encoder_model, decoder_model
 
 
+def _safe_load_keras_model(model_path):
+    """Loads model with config patching to fix Keras deserialization TypeErrors."""
+    class RobustGRU(GRU):
+        def __init__(self, *args, **kwargs):
+            kwargs.pop("time_major", None)
+            super().__init__(*args, **kwargs)
+
+    class RobustLSTM(LSTM):
+        def __init__(self, *args, **kwargs):
+            kwargs.pop("time_major", None)
+            super().__init__(*args, **kwargs)
+
+    custom_objects = {
+        "GRU": RobustGRU,
+        "LSTM": RobustLSTM,
+    }
+
+    try:
+        return load_model(model_path, compile=False, custom_objects=custom_objects)
+    except Exception:
+        return load_model(model_path, compile=False)
+
+
 @st.cache_resource(show_spinner=False)
 def load_lstm():
     _, config = load_tokenizer_and_config()
-    full_model = load_model(
-        os.path.join(MODELS_DIR, "lstm_model.h5"), 
-        compile=False
-    )
+    model_path = os.path.join(MODELS_DIR, "lstm_model.h5")
+    full_model = _safe_load_keras_model(model_path)
     return _rebuild_inference_models(full_model, "lstm", config["HID_DIM"])
 
 
 @st.cache_resource(show_spinner=False)
 def load_gru():
     _, config = load_tokenizer_and_config()
-    full_model = load_model(
-        os.path.join(MODELS_DIR, "gru_model.h5"), 
-        compile=False
-    )
+    model_path = os.path.join(MODELS_DIR, "gru_model.h5")
+    full_model = _safe_load_keras_model(model_path)
     return _rebuild_inference_models(full_model, "gru", config["HID_DIM"])
 
 
