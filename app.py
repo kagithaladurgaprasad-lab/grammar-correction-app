@@ -22,7 +22,7 @@ st.set_page_config(
 )
 
 # ----------------------------------------------------------------------------
-# 1. Initialize session state safely
+# Initialize session state safely
 # ----------------------------------------------------------------------------
 if "main_input" not in st.session_state:
     st.session_state.main_input = ""
@@ -35,7 +35,7 @@ MODELS_DIR = "models"
 HF_MODEL_NAME = "pszemraj/flan-t5-large-grammar-synthesis"
 
 # ----------------------------------------------------------------------------
-# Custom CSS
+# Custom CSS (Fixed Text Visibility & Contrast)
 # ----------------------------------------------------------------------------
 st.markdown(
     """
@@ -156,12 +156,19 @@ st.markdown(
         }
         div.stButton > button:hover { transform: translateY(-2px); box-shadow: 0 12px 28px rgba(236, 72, 153, 0.4); }
 
+        /* FIXED TEXTAREA STYLING */
         .stTextArea textarea {
-            background: rgba(255,255,255,0.04) !important;
-            color: #f2f0fb !important;
+            background-color: #1a162b !important;
+            color: #ffffff !important;
             border-radius: 14px !important;
-            border: 1px solid rgba(255,255,255,0.1) !important;
+            border: 1px solid rgba(255,255,255,0.2) !important;
             font-size: 1.02rem !important;
+        }
+        .stTextArea textarea:focus {
+            background-color: #231d38 !important;
+            color: #ffffff !important;
+            border-color: #a78bfa !important;
+            box-shadow: 0 0 10px rgba(167, 139, 250, 0.3) !important;
         }
 
         section[data-testid="stSidebar"] {
@@ -335,7 +342,7 @@ MODEL_META = {
 }
 
 # ----------------------------------------------------------------------------
-# 3. Sidebar with updated Example buttons
+# Sidebar
 # ----------------------------------------------------------------------------
 with st.sidebar:
     st.markdown("### ⚙️ About this app")
@@ -363,7 +370,6 @@ with st.sidebar:
                 </div>""",
                 unsafe_allow_html=True,
             )
-        # 4. Updated Clear history / Clear input button logic
         if st.button("Clear history", use_container_width=True):
             st.session_state.history = []
             st.rerun()
@@ -417,7 +423,6 @@ left, right = st.columns([1, 1], gap="large")
 with left:
     st.markdown('<div class="card"><h3>✍️ Your text</h3>', unsafe_allow_html=True)
     
-    # 2. Replaced text area using main_input state key safely
     text_input = st.text_area(
         label="Input",
         key="main_input",
@@ -449,7 +454,6 @@ with right:
     st.markdown('<div class="card"><h3>✅ Corrected result</h3>', unsafe_allow_html=True)
 
     if run:
-        # 5. Check main_input session state before inference
         sentence = st.session_state.main_input.strip()
         if not sentence:
             st.warning("Please enter a sentence.")
