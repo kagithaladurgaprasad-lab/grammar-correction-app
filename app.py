@@ -250,14 +250,22 @@ def _rebuild_inference_models(full_model, rnn_type, hid_dim):
 @st.cache_resource(show_spinner=False)
 def load_lstm():
     _, config = load_tokenizer_and_config()
-    full_model = load_model(os.path.join(MODELS_DIR, "lstm_model.h5"), compile=False)
+    full_model = load_model(
+        os.path.join(MODELS_DIR, "lstm_model.h5"), 
+        compile=False, 
+        safe_mode=False
+    )
     return _rebuild_inference_models(full_model, "lstm", config["HID_DIM"])
 
 
 @st.cache_resource(show_spinner=False)
 def load_gru():
     _, config = load_tokenizer_and_config()
-    full_model = load_model(os.path.join(MODELS_DIR, "gru_model.h5"), compile=False)
+    full_model = load_model(
+        os.path.join(MODELS_DIR, "gru_model.h5"), 
+        compile=False, 
+        safe_mode=False
+    )
     return _rebuild_inference_models(full_model, "gru", config["HID_DIM"])
 
 
