@@ -22,7 +22,7 @@ st.set_page_config(
 )
 
 MODELS_DIR = "models"
-HF_MODEL_NAME = "pszemraj/flan-t5-large-grammar-synthesis"
+HF_MODEL_NAME = "google/flan-t5-small"
 
 # ----------------------------------------------------------------------------
 # Custom CSS
