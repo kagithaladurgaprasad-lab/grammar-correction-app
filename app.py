@@ -12,17 +12,23 @@ import numpy as np
 import streamlit as st
 import torch
 
-# Keras 2 compatibility loader
+# Keras 2 / TF legacy compatibility imports
+import tensorflow as tf
 try:
     import tf_keras as keras
     from tf_keras.models import Model, load_model
-    from tf_keras.layers import Input, LSTM, GRU, Dense, Embedding
+    from tf_keras.layers import Input, Embedding, LSTM, GRU, Dense
 except ImportError:
     import tensorflow.keras as keras
     from tensorflow.keras.models import Model, load_model
-    from tensorflow.keras.layers import Input, LSTM, GRU, Dense, Embedding
+    from tensorflow.keras.layers import Input, Embedding, LSTM, GRU, Dense
 
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+# Hugging Face Transformers import wrapper
+try:
+    from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
 
 # ----------------------------------------------------------------------------
 # Page config
@@ -48,7 +54,7 @@ MODELS_DIR = "models"
 HF_MODEL_NAME = "pszemraj/flan-t5-large-grammar-synthesis"
 
 # ----------------------------------------------------------------------------
-# Custom CSS (Fixed Text Visibility & Contrast)
+# Custom CSS
 # ----------------------------------------------------------------------------
 st.markdown(
     """
@@ -169,7 +175,6 @@ st.markdown(
         }
         div.stButton > button:hover { transform: translateY(-2px); box-shadow: 0 12px 28px rgba(236, 72, 153, 0.4); }
 
-        /* FIXED TEXTAREA STYLING */
         .stTextArea textarea {
             background-color: #1a162b !important;
             color: #ffffff !important;
@@ -203,7 +208,7 @@ st.markdown(
 )
 
 # ----------------------------------------------------------------------------
-# Loaders — lazy loading cached functions
+# Loaders
 # ----------------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
 def load_tokenizer_and_config():
@@ -212,6 +217,56 @@ def load_tokenizer_and_config():
     with open(os.path.join(MODELS_DIR, "config.json")) as f:
         config = json.load(f)
     return tokenizer, config
+
+
+def _rebuild_model_architecture(rnn_type, config):
+    """Fallback architecture builder using config if deserialization fails."""
+    vocab_size = config["VOCAB_SIZE"]
+    emb_dim = config["EMB_DIM"]
+    hid_dim = config["HID_DIM"]
+
+    # Encoder
+    enc_inputs = Input(shape=(None,), name="encoder_input")
+    enc_emb = Embedding(vocab_size, emb_dim, name="encoder_embedding")(enc_inputs)
+    
+    if rnn_type == "lstm":
+        encoder_rnn = LSTM(hid_dim, return_state=True, name="encoder_lstm")
+    else:
+        encoder_rnn = GRU(hid_dim, return_state=True, name="encoder_gru")
+        
+    encoder_outputs = encoder_rnn(enc_emb)
+
+    # Decoder
+    dec_inputs = Input(shape=(None,), name="decoder_input")
+    dec_emb = Embedding(vocab_size, emb_dim, name="decoder_embedding")(dec_inputs)
+    
+    if rnn_type == "lstm":
+        decoder_rnn = LSTM(hid_dim, return_sequences=True, return_state=True, name="decoder_lstm")
+        dec_out, _, _ = decoder_rnn(dec_emb, initial_state=encoder_outputs[1:])
+    else:
+        decoder_rnn = GRU(hid_dim, return_sequences=True, return_state=True, name="decoder_gru")
+        dec_out, _ = decoder_rnn(dec_emb, initial_state=[encoder_outputs[1]])
+
+    decoder_dense = Dense(vocab_size, activation="softmax", name="decoder_dense")
+    dec_out = decoder_dense(dec_out)
+
+    return Model([enc_inputs, dec_inputs], dec_out)
+
+
+def _safe_load_keras_model(model_path, rnn_type, config):
+    """Loads Keras model robustly, handling missing ops like 'NotEqual'."""
+    custom_objects = {
+        "NotEqual": tf.math.not_equal,
+        "not_equal": tf.math.not_equal,
+    }
+
+    try:
+        return load_model(model_path, compile=False, custom_objects=custom_objects)
+    except Exception:
+        # Fallback: Build standard architecture and load weights
+        full_model = _rebuild_model_architecture(rnn_type, config)
+        full_model.load_weights(model_path)
+        return full_model
 
 
 def _rebuild_inference_models(full_model, rnn_type, hid_dim):
@@ -248,34 +303,11 @@ def _rebuild_inference_models(full_model, rnn_type, hid_dim):
     return encoder_model, decoder_model
 
 
-def _safe_load_keras_model(model_path):
-    """Loads model with config patching to fix Keras deserialization TypeErrors."""
-    class RobustGRU(GRU):
-        def __init__(self, *args, **kwargs):
-            kwargs.pop("time_major", None)
-            super().__init__(*args, **kwargs)
-
-    class RobustLSTM(LSTM):
-        def __init__(self, *args, **kwargs):
-            kwargs.pop("time_major", None)
-            super().__init__(*args, **kwargs)
-
-    custom_objects = {
-        "GRU": RobustGRU,
-        "LSTM": RobustLSTM,
-    }
-
-    try:
-        return load_model(model_path, compile=False, custom_objects=custom_objects)
-    except Exception:
-        return load_model(model_path, compile=False)
-
-
 @st.cache_resource(show_spinner=False)
 def load_lstm():
     _, config = load_tokenizer_and_config()
     model_path = os.path.join(MODELS_DIR, "lstm_model.h5")
-    full_model = _safe_load_keras_model(model_path)
+    full_model = _safe_load_keras_model(model_path, "lstm", config)
     return _rebuild_inference_models(full_model, "lstm", config["HID_DIM"])
 
 
@@ -283,12 +315,15 @@ def load_lstm():
 def load_gru():
     _, config = load_tokenizer_and_config()
     model_path = os.path.join(MODELS_DIR, "gru_model.h5")
-    full_model = _safe_load_keras_model(model_path)
+    full_model = _safe_load_keras_model(model_path, "gru", config)
     return _rebuild_inference_models(full_model, "gru", config["HID_DIM"])
 
 
 @st.cache_resource(show_spinner=False)
 def load_transformer():
+    if not TRANSFORMERS_AVAILABLE:
+        st.error("Transformers library not available in environment.")
+        st.stop()
     tok = AutoTokenizer.from_pretrained(HF_MODEL_NAME)
     mdl = AutoModelForSeq2SeqLM.from_pretrained(HF_MODEL_NAME)
     device = "cuda" if torch.cuda.is_available() else "cpu"
