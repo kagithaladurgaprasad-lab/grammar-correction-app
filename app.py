@@ -21,8 +21,18 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ----------------------------------------------------------------------------
+# 1. Initialize session state safely
+# ----------------------------------------------------------------------------
+if "main_input" not in st.session_state:
+    st.session_state.main_input = ""
+if "selected_model" not in st.session_state:
+    st.session_state.selected_model = "Transformer"
+if "history" not in st.session_state:
+    st.session_state.history = []
+
 MODELS_DIR = "models"
-HF_MODEL_NAME = "google/flan-t5-small"
+HF_MODEL_NAME = "pszemraj/flan-t5-large-grammar-synthesis"
 
 # ----------------------------------------------------------------------------
 # Custom CSS
@@ -173,7 +183,7 @@ st.markdown(
 )
 
 # ----------------------------------------------------------------------------
-# Loaders — one cached function per model, so only the selected one loads
+# Loaders — lazy loading cached functions
 # ----------------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
 def load_tokenizer_and_config():
@@ -185,13 +195,11 @@ def load_tokenizer_and_config():
 
 
 def _rebuild_inference_models(full_model, rnn_type, hid_dim):
-    """Reconstruct step-by-step encoder/decoder inference models from the
-    saved training model's layers (weights are reused, not retrained)."""
     layer_suffix = "lstm" if rnn_type == "lstm" else "gru"
 
     encoder_input_tensor = full_model.get_layer("encoder_input").output
     encoder_rnn_layer = full_model.get_layer(f"encoder_{layer_suffix}")
-    encoder_layer_outputs = encoder_rnn_layer.output  # [seq_out, state_h, (state_c)]
+    encoder_layer_outputs = encoder_rnn_layer.output
     encoder_states = list(encoder_layer_outputs[1:])
     encoder_model = Model(encoder_input_tensor, encoder_states)
 
@@ -312,14 +320,6 @@ def count_edits(original, corrected):
     return sum(1 for tag, *_ in matcher.get_opcodes() if tag != "equal")
 
 
-# ----------------------------------------------------------------------------
-# Session state
-# ----------------------------------------------------------------------------
-if "history" not in st.session_state:
-    st.session_state.history = []
-if "input_text" not in st.session_state:
-    st.session_state.input_text = ""
-
 EXAMPLES = [
     "She dont like to eat vegetables but she like fruits.",
     "Me and him was going to the store yesterday.",
@@ -335,7 +335,7 @@ MODEL_META = {
 }
 
 # ----------------------------------------------------------------------------
-# Sidebar
+# 3. Sidebar with updated Example buttons
 # ----------------------------------------------------------------------------
 with st.sidebar:
     st.markdown("### ⚙️ About this app")
@@ -348,7 +348,9 @@ with st.sidebar:
     st.markdown("### 💡 Try an example")
     for ex in EXAMPLES:
         if st.button(ex, key=f"ex_{hash(ex)}", use_container_width=True):
-            st.session_state.input_text = ex
+            st.session_state.main_input = ex
+            st.rerun()
+
     st.markdown("---")
     st.markdown("### 🕘 Recent corrections")
     if st.session_state.history:
@@ -361,6 +363,7 @@ with st.sidebar:
                 </div>""",
                 unsafe_allow_html=True,
             )
+        # 4. Updated Clear history / Clear input button logic
         if st.button("Clear history", use_container_width=True):
             st.session_state.history = []
             st.rerun()
@@ -394,9 +397,11 @@ st.markdown('<div class="model-picker"><h3>🎚️ Choose a model</h3>', unsafe_
 selected_model = st.select_slider(
     label="model_picker",
     options=["LSTM", "GRU", "Transformer"],
-    value="Transformer",
+    value=st.session_state.selected_model,
     label_visibility="collapsed",
 )
+st.session_state.selected_model = selected_model
+
 meta = MODEL_META[selected_model]
 st.markdown(
     f'<span class="model-tag {meta["tag_class"]}">{meta["emoji"]} {selected_model} — {meta["desc"]}</span>',
@@ -411,35 +416,45 @@ left, right = st.columns([1, 1], gap="large")
 
 with left:
     st.markdown('<div class="card"><h3>✍️ Your text</h3>', unsafe_allow_html=True)
+    
+    # 2. Replaced text area using main_input state key safely
     text_input = st.text_area(
-        label="input",
-        value=st.session_state.input_text,
+        label="Input",
+        key="main_input",
         height=220,
         placeholder="Type or paste a sentence with grammar mistakes here...",
         label_visibility="collapsed",
-        key="main_input",
     )
 
+    btn_col1, btn_col2 = st.columns([3, 1])
+    with btn_col1:
+        run = st.button("✨ Correct grammar", use_container_width=True)
+    with btn_col2:
+        if st.button("🗑️ Clear", use_container_width=True):
+            st.session_state.main_input = ""
+            st.rerun()
+
     if selected_model == "Transformer":
-        col_a, col_b, col_c = st.columns([1, 1, 1])
+        col_a, col_b = st.columns([1, 1])
         with col_a:
             num_beams = st.slider("Beam width", min_value=1, max_value=8, value=5)
         with col_b:
             max_len_ui = st.slider("Max output length", min_value=32, max_value=256, value=128, step=16)
-        with col_c:
-            st.write("")
-            st.write("")
-            run = st.button("✨ Correct grammar", use_container_width=True)
     else:
         st.caption(f"{selected_model} uses greedy decoding — no extra settings needed.")
-        run = st.button("✨ Correct grammar", use_container_width=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
 
 with right:
     st.markdown('<div class="card"><h3>✅ Corrected result</h3>', unsafe_allow_html=True)
 
-    if run and text_input.strip():
+    if run:
+        # 5. Check main_input session state before inference
+        sentence = st.session_state.main_input.strip()
+        if not sentence:
+            st.warning("Please enter a sentence.")
+            st.stop()
+
         try:
             start = time.time()
             with st.spinner(f"Loading {selected_model} and polishing your sentence..."):
@@ -447,18 +462,18 @@ with right:
                     tokenizer, config = load_tokenizer_and_config()
                     encoder_model, decoder_model = load_lstm()
                     corrected = greedy_decode_keras(
-                        encoder_model, decoder_model, tokenizer, config, text_input.strip(), "lstm"
+                        encoder_model, decoder_model, tokenizer, config, sentence, "lstm"
                     )
                 elif selected_model == "GRU":
                     tokenizer, config = load_tokenizer_and_config()
                     encoder_model, decoder_model = load_gru()
                     corrected = greedy_decode_keras(
-                        encoder_model, decoder_model, tokenizer, config, text_input.strip(), "gru"
+                        encoder_model, decoder_model, tokenizer, config, sentence, "gru"
                     )
                 else:
                     tok, mdl, device = load_transformer()
                     corrected = correct_with_transformer(
-                        text_input.strip(), tok, mdl, device, max_length=max_len_ui, num_beams=num_beams
+                        sentence, tok, mdl, device, max_length=max_len_ui, num_beams=num_beams
                     )
             elapsed = time.time() - start
 
@@ -467,11 +482,11 @@ with right:
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown("**Word-level changes:**")
             st.markdown(
-                f'<div class="result-box">{render_diff_html(text_input.strip(), corrected)}</div>',
+                f'<div class="result-box">{render_diff_html(sentence, corrected)}</div>',
                 unsafe_allow_html=True,
             )
 
-            n_edits = count_edits(text_input.strip(), corrected)
+            n_edits = count_edits(sentence, corrected)
             st.markdown("<br>", unsafe_allow_html=True)
             m1, m2, m3 = st.columns(3)
             with m1:
@@ -499,7 +514,7 @@ with right:
             )
 
             st.session_state.history.append(
-                {"model": selected_model, "original": text_input.strip(), "corrected": corrected}
+                {"model": selected_model, "original": sentence, "corrected": corrected}
             )
 
         except FileNotFoundError as e:
@@ -509,9 +524,6 @@ with right:
                 f"`models/tokenizer.pkl`, and `models/config.json` are all present in your repo.\n\n"
                 f"Missing: `{e.filename}`"
             )
-
-    elif run and not text_input.strip():
-        st.warning("Type something first — the text box is empty.")
     else:
         st.caption("Your corrected sentence will appear here once you click **Correct grammar**.")
 
