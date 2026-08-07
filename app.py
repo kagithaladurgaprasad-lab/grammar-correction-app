@@ -4,11 +4,13 @@ import os
 os.environ["TF_USE_LEGACY_KERAS"] = "1"
 
 import difflib
+import io
 import json
 import pickle
 import time
 
 import numpy as np
+import pandas as pd
 import streamlit as st
 import torch
 
@@ -49,6 +51,12 @@ if "selected_model" not in st.session_state:
     st.session_state.selected_model = "Transformer"
 if "history" not in st.session_state:
     st.session_state.history = []
+if "compare_all" not in st.session_state:
+    st.session_state.compare_all = False
+if "stats" not in st.session_state:
+    st.session_state.stats = {"total_runs": 0, "total_edits": 0, "clean_sentences": 0}
+if "explanation" not in st.session_state:
+    st.session_state.explanation = None
 
 MODELS_DIR = "models"
 HF_MODEL_NAME = "pszemraj/flan-t5-large-grammar-synthesis"
@@ -134,6 +142,31 @@ st.markdown(
         .tag-gru { background: rgba(251,191,36,0.18); color: #fcd34d; border: 1px solid rgba(251,191,36,0.4); }
         .tag-transformer { background: rgba(244,114,182,0.18); color: #f9a8d4; border: 1px solid rgba(244,114,182,0.4); }
 
+        /* Model selector buttons */
+        div[data-testid="stHorizontalBlock"] div.stButton > button {
+            width: 100%;
+            border-radius: 14px;
+            font-weight: 700;
+            padding: 0.75rem 0.5rem;
+            transition: all 0.15s ease;
+        }
+        div[data-testid="stHorizontalBlock"] div.stButton > button:disabled {
+            background: linear-gradient(90deg, #7c3aed, #ec4899) !important;
+            color: white !important;
+            opacity: 1 !important;
+            border: none !important;
+            box-shadow: 0 8px 24px rgba(124, 58, 237, 0.35);
+        }
+        div[data-testid="stHorizontalBlock"] div.stButton > button:not(:disabled) {
+            background: rgba(255,255,255,0.05) !important;
+            color: #cbd0e6 !important;
+            border: 1px solid rgba(255,255,255,0.12) !important;
+        }
+        div[data-testid="stHorizontalBlock"] div.stButton > button:not(:disabled):hover {
+            border-color: #a78bfa !important;
+            color: white !important;
+        }
+
         .card {
             background: rgba(255,255,255,0.045);
             border: 1px solid rgba(255,255,255,0.08);
@@ -152,6 +185,16 @@ st.markdown(
             font-size: 1.05rem;
             line-height: 1.65;
             color: #eafff5;
+        }
+
+        .explain-box {
+            background: rgba(167, 139, 250, 0.08);
+            border: 1px solid rgba(167, 139, 250, 0.35);
+            border-radius: 16px;
+            padding: 1.1rem 1.3rem;
+            font-size: 0.98rem;
+            line-height: 1.6;
+            color: #ede9fe;
         }
 
         .diff-add { background: rgba(16, 185, 129, 0.28); color: #baffdf; padding: 0.05rem 0.25rem; border-radius: 6px; font-weight: 600; }
@@ -202,6 +245,8 @@ st.markdown(
         .history-item .orig { color: #ff9fb3; text-decoration: line-through; }
         .history-item .fixed { color: #8ff5c4; }
         .history-item .modeltag { color: #93c5fd; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; }
+
+        .stats-row { display: flex; gap: 0.6rem; margin-bottom: 0.8rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -228,18 +273,18 @@ def _rebuild_model_architecture(rnn_type, config):
     # Encoder
     enc_inputs = Input(shape=(None,), name="encoder_input")
     enc_emb = Embedding(vocab_size, emb_dim, name="encoder_embedding")(enc_inputs)
-    
+
     if rnn_type == "lstm":
         encoder_rnn = LSTM(hid_dim, return_state=True, name="encoder_lstm")
     else:
         encoder_rnn = GRU(hid_dim, return_state=True, name="encoder_gru")
-        
+
     encoder_outputs = encoder_rnn(enc_emb)
 
     # Decoder
     dec_inputs = Input(shape=(None,), name="decoder_input")
     dec_emb = Embedding(vocab_size, emb_dim, name="decoder_embedding")(dec_inputs)
-    
+
     if rnn_type == "lstm":
         decoder_rnn = LSTM(hid_dim, return_sequences=True, return_state=True, name="decoder_lstm")
         dec_out, _, _ = decoder_rnn(dec_emb, initial_state=encoder_outputs[1:])
@@ -377,6 +422,19 @@ def correct_with_transformer(text, tok, mdl, device, max_length=128, num_beams=5
     return tok.decode(output_ids[0], skip_special_tokens=True)
 
 
+def explain_correction(original, corrected, tok, mdl, device):
+    """Uses the Transformer to explain, in plain English, what grammar mistakes
+    were fixed. Purely for user learning — a small but genuinely useful add-on."""
+    prompt = (
+        "Explain in one short, simple sentence what grammar mistake was fixed "
+        f"going from this sentence: \"{original}\" to this corrected sentence: \"{corrected}\"."
+    )
+    inputs = tok(prompt, return_tensors="pt", truncation=True).to(device)
+    with torch.no_grad():
+        output_ids = mdl.generate(**inputs, max_length=64, num_beams=4, early_stopping=True)
+    return tok.decode(output_ids[0], skip_special_tokens=True)
+
+
 def render_diff_html(original, corrected):
     orig_words = original.split()
     corr_words = corrected.split()
@@ -398,6 +456,24 @@ def render_diff_html(original, corrected):
 def count_edits(original, corrected):
     matcher = difflib.SequenceMatcher(None, original.split(), corrected.split())
     return sum(1 for tag, *_ in matcher.get_opcodes() if tag != "equal")
+
+
+def run_model(model_name, sentence, num_beams=5, max_len_ui=128):
+    """Runs a single model on a sentence and returns (corrected_text, elapsed_seconds)."""
+    start = time.time()
+    if model_name == "LSTM":
+        tokenizer, config = load_tokenizer_and_config()
+        encoder_model, decoder_model = load_lstm()
+        corrected = greedy_decode_keras(encoder_model, decoder_model, tokenizer, config, sentence, "lstm")
+    elif model_name == "GRU":
+        tokenizer, config = load_tokenizer_and_config()
+        encoder_model, decoder_model = load_gru()
+        corrected = greedy_decode_keras(encoder_model, decoder_model, tokenizer, config, sentence, "gru")
+    else:
+        tok, mdl, device = load_transformer()
+        corrected = correct_with_transformer(sentence, tok, mdl, device, max_length=max_len_ui, num_beams=num_beams)
+    elapsed = time.time() - start
+    return corrected, elapsed
 
 
 EXAMPLES = [
@@ -424,6 +500,17 @@ with st.sidebar:
         "two **custom seq2seq models trained from scratch** (LSTM, GRU), and a "
         "**pretrained Transformer** as an upper-bound baseline."
     )
+
+    st.markdown("---")
+    st.markdown("### 📊 Session stats")
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        st.metric("Runs", st.session_state.stats["total_runs"])
+    with s2:
+        st.metric("Edits", st.session_state.stats["total_edits"])
+    with s3:
+        st.metric("Clean", st.session_state.stats["clean_sentences"])
+
     st.markdown("---")
     st.markdown("### 💡 Try an example")
     for ex in EXAMPLES:
@@ -443,8 +530,21 @@ with st.sidebar:
                 </div>""",
                 unsafe_allow_html=True,
             )
+
+        hist_df = pd.DataFrame(st.session_state.history)
+        csv_buffer = io.StringIO()
+        hist_df.to_csv(csv_buffer, index=False)
+        st.download_button(
+            "⬇ Export history (CSV)",
+            data=csv_buffer.getvalue(),
+            file_name="grammar_correction_history.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
         if st.button("Clear history", use_container_width=True):
             st.session_state.history = []
+            st.session_state.stats = {"total_runs": 0, "total_edits": 0, "clean_sentences": 0}
             st.rerun()
     else:
         st.caption("Your corrected sentences will show up here.")
@@ -456,9 +556,9 @@ st.markdown(
     """
     <div class="hero">
         <h1>✒️ GrammarAI</h1>
-        <p>Slide between three grammar-correction models — LSTM, GRU, and a pretrained
-        Transformer — and see how each one rewrites your sentence, side by side with
-        a word-level diff.</p>
+        <p>Pick a model — LSTM, GRU, or a pretrained Transformer — and see how it
+        rewrites your sentence, with a word-level diff and a plain-English
+        explanation of what changed.</p>
         <div class="badge-row">
             <span class="badge">🔵 LSTM seq2seq</span>
             <span class="badge">🟡 GRU seq2seq</span>
@@ -470,90 +570,105 @@ st.markdown(
 )
 
 # ----------------------------------------------------------------------------
-# Model picker (slider)
+# Model picker — button group (replaces the old slider)
 # ----------------------------------------------------------------------------
 st.markdown('<div class="model-picker"><h3>🎚️ Choose a model</h3>', unsafe_allow_html=True)
-selected_model = st.select_slider(
-    label="model_picker",
-    options=["LSTM", "GRU", "Transformer"],
-    value=st.session_state.selected_model,
-    label_visibility="collapsed",
-)
-st.session_state.selected_model = selected_model
 
-meta = MODEL_META[selected_model]
-st.markdown(
-    f'<span class="model-tag {meta["tag_class"]}">{meta["emoji"]} {selected_model} — {meta["desc"]}</span>',
-    unsafe_allow_html=True,
+btn_cols = st.columns(3)
+model_options = ["LSTM", "GRU", "Transformer"]
+for i, m in enumerate(model_options):
+    with btn_cols[i]:
+        is_active = st.session_state.selected_model == m and not st.session_state.compare_all
+        label = f"{'✅ ' if is_active else MODEL_META[m]['emoji'] + ' '}{m}"
+        if st.button(label, key=f"model_btn_{m}", use_container_width=True, disabled=is_active):
+            st.session_state.selected_model = m
+            st.session_state.compare_all = False
+            st.rerun()
+
+st.session_state.compare_all = st.checkbox(
+    "🆚 Compare all 3 models at once",
+    value=st.session_state.compare_all,
+    help="Runs LSTM, GRU, and the Transformer together and shows all three results side by side.",
 )
+
+if not st.session_state.compare_all:
+    meta = MODEL_META[st.session_state.selected_model]
+    st.markdown(
+        f'<span class="model-tag {meta["tag_class"]}">{meta["emoji"]} {st.session_state.selected_model} — {meta["desc"]}</span>',
+        unsafe_allow_html=True,
+    )
 st.markdown("</div>", unsafe_allow_html=True)
 
 # ----------------------------------------------------------------------------
-# Main layout
+# Input card
 # ----------------------------------------------------------------------------
-left, right = st.columns([1, 1], gap="large")
+st.markdown('<div class="card"><h3>✍️ Your text</h3>', unsafe_allow_html=True)
 
-with left:
-    st.markdown('<div class="card"><h3>✍️ Your text</h3>', unsafe_allow_html=True)
-    
-    text_input = st.text_area(
-        label="Input",
-        key="main_input",
-        height=220,
-        placeholder="Type or paste a sentence with grammar mistakes here...",
-        label_visibility="collapsed",
-    )
+text_input = st.text_area(
+    label="Input",
+    key="main_input",
+    height=160,
+    placeholder="Type or paste a sentence with grammar mistakes here...",
+    label_visibility="collapsed",
+)
 
-    btn_col1, btn_col2 = st.columns([3, 1])
-    with btn_col1:
-        run = st.button("✨ Correct grammar", use_container_width=True)
-    with btn_col2:
-        if st.button("🗑️ Clear", use_container_width=True):
-            st.session_state.main_input = ""
-            st.rerun()
+btn_col1, btn_col2 = st.columns([3, 1])
+with btn_col1:
+    run = st.button("✨ Correct grammar", use_container_width=True)
+with btn_col2:
+    if st.button("🗑️ Clear", use_container_width=True):
+        st.session_state.main_input = ""
+        st.session_state.explanation = None
+        st.rerun()
 
-    if selected_model == "Transformer":
-        col_a, col_b = st.columns([1, 1])
-        with col_a:
-            num_beams = st.slider("Beam width", min_value=1, max_value=8, value=5)
-        with col_b:
-            max_len_ui = st.slider("Max output length", min_value=32, max_value=256, value=128, step=16)
-    else:
-        st.caption(f"{selected_model} uses greedy decoding — no extra settings needed.")
+num_beams, max_len_ui = 5, 128
+if (not st.session_state.compare_all and st.session_state.selected_model == "Transformer") or st.session_state.compare_all:
+    col_a, col_b = st.columns(2)
+    with col_a:
+        num_beams = st.slider("Beam width (Transformer)", min_value=1, max_value=8, value=5)
+    with col_b:
+        max_len_ui = st.slider("Max output length (Transformer)", min_value=32, max_value=256, value=128, step=16)
 
-    st.markdown("</div>", unsafe_allow_html=True)
+st.markdown("</div>", unsafe_allow_html=True)
 
-with right:
-    st.markdown('<div class="card"><h3>✅ Corrected result</h3>', unsafe_allow_html=True)
+# ----------------------------------------------------------------------------
+# Results
+# ----------------------------------------------------------------------------
+if run:
+    sentence = st.session_state.main_input.strip()
+    if not sentence:
+        st.warning("Please enter a sentence.")
+        st.stop()
 
-    if run:
-        sentence = st.session_state.main_input.strip()
-        if not sentence:
-            st.warning("Please enter a sentence.")
-            st.stop()
+    try:
+        if st.session_state.compare_all:
+            st.markdown("### 🆚 Results — all three models")
+            result_cols = st.columns(3)
+            for i, m in enumerate(model_options):
+                with result_cols[i]:
+                    meta = MODEL_META[m]
+                    st.markdown(
+                        f'<span class="model-tag {meta["tag_class"]}">{meta["emoji"]} {m}</span>',
+                        unsafe_allow_html=True,
+                    )
+                    with st.spinner(f"Running {m}..."):
+                        corrected, elapsed = run_model(m, sentence, num_beams, max_len_ui)
+                    st.markdown(f'<div class="result-box">{corrected}</div>', unsafe_allow_html=True)
+                    n_edits = count_edits(sentence, corrected)
+                    st.caption(f"{n_edits} edit(s) · {elapsed:.2f}s")
 
-        try:
-            start = time.time()
+                    st.session_state.history.append({"model": m, "original": sentence, "corrected": corrected})
+                    st.session_state.stats["total_runs"] += 1
+                    st.session_state.stats["total_edits"] += n_edits
+                    if n_edits == 0:
+                        st.session_state.stats["clean_sentences"] += 1
+
+        else:
+            selected_model = st.session_state.selected_model
             with st.spinner(f"Loading {selected_model} and polishing your sentence..."):
-                if selected_model == "LSTM":
-                    tokenizer, config = load_tokenizer_and_config()
-                    encoder_model, decoder_model = load_lstm()
-                    corrected = greedy_decode_keras(
-                        encoder_model, decoder_model, tokenizer, config, sentence, "lstm"
-                    )
-                elif selected_model == "GRU":
-                    tokenizer, config = load_tokenizer_and_config()
-                    encoder_model, decoder_model = load_gru()
-                    corrected = greedy_decode_keras(
-                        encoder_model, decoder_model, tokenizer, config, sentence, "gru"
-                    )
-                else:
-                    tok, mdl, device = load_transformer()
-                    corrected = correct_with_transformer(
-                        sentence, tok, mdl, device, max_length=max_len_ui, num_beams=num_beams
-                    )
-            elapsed = time.time() - start
+                corrected, elapsed = run_model(selected_model, sentence, num_beams, max_len_ui)
 
+            st.markdown('<div class="card"><h3>✅ Corrected result</h3>', unsafe_allow_html=True)
             st.markdown(f'<div class="result-box">{corrected}</div>', unsafe_allow_html=True)
 
             st.markdown("<br>", unsafe_allow_html=True)
@@ -582,6 +697,18 @@ with right:
                     unsafe_allow_html=True,
                 )
 
+            # --- AI explanation of the fix (new) ---
+            st.markdown("<br>", unsafe_allow_html=True)
+            if n_edits > 0:
+                if st.button("🧠 Explain what was wrong", use_container_width=True):
+                    with st.spinner("Thinking..."):
+                        tok, mdl, device = load_transformer()
+                        st.session_state.explanation = explain_correction(sentence, corrected, tok, mdl, device)
+                if st.session_state.explanation:
+                    st.markdown(f'<div class="explain-box">💡 {st.session_state.explanation}</div>', unsafe_allow_html=True)
+            else:
+                st.info("No grammar issues found — this sentence was already correct!")
+
             st.download_button(
                 "⬇ Download corrected text",
                 data=corrected,
@@ -590,21 +717,22 @@ with right:
                 use_container_width=True,
             )
 
-            st.session_state.history.append(
-                {"model": selected_model, "original": sentence, "corrected": corrected}
-            )
+            st.session_state.history.append({"model": selected_model, "original": sentence, "corrected": corrected})
+            st.session_state.stats["total_runs"] += 1
+            st.session_state.stats["total_edits"] += n_edits
+            if n_edits == 0:
+                st.session_state.stats["clean_sentences"] += 1
 
-        except FileNotFoundError as e:
-            st.error(
-                f"Couldn't find model files for **{selected_model}**. "
-                f"Make sure `models/lstm_model.h5`, `models/gru_model.h5`, "
-                f"`models/tokenizer.pkl`, and `models/config.json` are all present in your repo.\n\n"
-                f"Missing: `{e.filename}`"
-            )
-    else:
-        st.caption("Your corrected sentence will appear here once you click **Correct grammar**.")
+            st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown("</div>", unsafe_allow_html=True)
+    except FileNotFoundError as e:
+        st.error(
+            f"Couldn't find required model files. Make sure `models/lstm_model.h5`, "
+            f"`models/gru_model.h5`, `models/tokenizer.pkl`, and `models/config.json` "
+            f"are all present in your repo.\n\nMissing: `{e.filename}`"
+        )
+else:
+    st.caption("Your corrected sentence will appear here once you click **Correct grammar**.")
 
 # ----------------------------------------------------------------------------
 # Footer
